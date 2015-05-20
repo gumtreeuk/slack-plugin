@@ -3,14 +3,13 @@ package jenkins.plugins.slack;
 
 import hudson.EnvVars;
 import hudson.Util;
-import hudson.EnvVars;
-import hudson.model.BuildListener;
-import hudson.model.Result;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
+import hudson.model.BuildListener;
 import hudson.model.Cause;
 import hudson.model.CauseAction;
 import hudson.model.Hudson;
+import hudson.model.Result;
 import hudson.model.Run;
 import hudson.scm.ChangeLogSet;
 import hudson.scm.ChangeLogSet.AffectedFile;
@@ -127,8 +126,8 @@ public class ActiveNotifier implements FineGrainedNotifier {
                 && jobProperty.getNotifyBackToNormal())
                 || (result == Result.SUCCESS && jobProperty.getNotifySuccess())
                 || (result == Result.UNSTABLE && jobProperty.getNotifyUnstable())) {
-            getSlack(r).publish(getBuildStatusMessage(r, jobProperty.includeTestSummary(),
-                            jobProperty.includeCustomMessage()),
+            getSlack(r).publish(
+                    getBuildStatusMessage(r, jobProperty.includeTestSummary(), jobProperty.includeCustomMessage()),
                     getBuildColor(r));
             if (jobProperty.getShowCommitList()) {
                 getSlack(r).publish(getCommitList(r), getBuildColor(r));
@@ -285,6 +284,10 @@ public class ActiveNotifier implements FineGrainedNotifier {
         }
 
         private MessageBuilder startMessage() {
+            if (build.getResult() == Result.FAILURE && getUserId() != null) {
+                message.append("<@").append(getUserId()).append(">");
+                message.append(": You have broken the build. Please fix it and don't let your teammates waiting!\n");
+            }
             message.append(this.escape(build.getProject().getFullDisplayName()));
             message.append(" - ");
             message.append(this.escape(build.getDisplayName()));
@@ -305,8 +308,7 @@ public class ActiveNotifier implements FineGrainedNotifier {
         }
 
         public MessageBuilder appendTestSummary() {
-            AbstractTestResultAction<?> action = this.build
-                    .getAction(AbstractTestResultAction.class);
+            AbstractTestResultAction<?> action = this.build.getAction(AbstractTestResultAction.class);
             if (action != null) {
                 int total = action.getTotalCount();
                 int failed = action.getFailCount();
@@ -344,6 +346,36 @@ public class ActiveNotifier implements FineGrainedNotifier {
             string = string.replace(">", "&gt;");
 
             return string;
+        }
+
+        private String getUserId() {
+            Cause.UserIdCause userIdCause = findUserIdCause();
+            return userIdCause != null ? userIdCause.getUserId() : null;
+        }
+
+        private Cause.UserIdCause findUserIdCause() {
+            CauseAction causeAction = build.getAction(CauseAction.class);
+            if (causeAction != null) {
+                Cause.UserIdCause userIdCause = causeAction.findCause(Cause.UserIdCause.class);
+                if (userIdCause != null) {
+                    return userIdCause;
+                } else {
+                    Cause.UpstreamCause upstreamCause = causeAction.findCause(Cause.UpstreamCause.class);
+                    while(upstreamCause != null) {
+                        List<Cause> upstreamCauses = upstreamCause.getUpstreamCauses();
+                        upstreamCause = null;
+                        for (Cause cause: upstreamCauses) {
+                            if (Cause.UserIdCause.class.isAssignableFrom(cause.getClass())) {
+                                return (Cause.UserIdCause) cause;
+                            } else if (Cause.UpstreamCause.class.isAssignableFrom(cause.getClass())) {
+                                upstreamCause = (Cause.UpstreamCause) cause;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return null;
         }
 
         public String toString() {
