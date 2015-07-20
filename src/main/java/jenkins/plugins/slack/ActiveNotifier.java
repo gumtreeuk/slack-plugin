@@ -9,6 +9,7 @@ import hudson.model.BuildListener;
 import hudson.model.Cause;
 import hudson.model.CauseAction;
 import hudson.model.Hudson;
+import hudson.model.Project;
 import hudson.model.Result;
 import hudson.model.Run;
 import hudson.scm.ChangeLogSet;
@@ -17,13 +18,16 @@ import hudson.scm.ChangeLogSet.Entry;
 import hudson.tasks.test.AbstractTestResultAction;
 import hudson.triggers.SCMTrigger;
 import hudson.util.LogTaskListener;
+import jenkins.model.Jenkins;
 import org.apache.commons.lang.StringUtils;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static java.util.logging.Level.INFO;
@@ -76,7 +80,7 @@ public class ActiveNotifier implements FineGrainedNotifier {
         if (causeAction != null) {
             Cause scmCause = causeAction.findCause(SCMTrigger.SCMTriggerCause.class);
             if (scmCause == null) {
-                MessageBuilder message = new MessageBuilder(notifier, build);
+                MessageBuilder message = new MessageBuilder(notifier, build, true);
                 message.append(causeAction.getShortDescription());
                 notifyStart(build, message.appendOpenLink().toString());
             }
@@ -237,6 +241,38 @@ public class ActiveNotifier implements FineGrainedNotifier {
             startMessage();
         }
 
+        public MessageBuilder(SlackNotifier notifier, AbstractBuild build, boolean verifyQa3Tests) {
+            this.notifier = notifier;
+            this.message = new StringBuffer();
+            this.build = build;
+
+            if (verifyQa3Tests) {
+                appendAlertIfAnyOfQa3TestsBuildIsFailing();
+            }
+            startMessage();
+        }
+
+        public void appendAlertIfAnyOfQa3TestsBuildIsFailing() {
+            String userId = getUserId(build);
+            // this alert only has sense if someone is trying to copy release artifacts from DEV repo to PROD repo
+            // by building Copy_Artifact_To_Prod job
+            // for any other job this alert can be ignored
+            if (build.getProject().getName().toLowerCase().contains("copy")) {
+
+                List<String> brokenQa3TestBuilds = getBrokenQa3TestBuilds();
+                if (!brokenQa3TestBuilds.isEmpty()) {
+                    appendSendToEverybody();
+                    message.append(": Watch out everybody!!! ");
+                    appendSendTo(userId);
+                    message.append(" is trying to release when there are QA3 tests failing!!! Whoever punch him/her first will get a star. :punch: \n");
+                    message.append("Broken QA3 Tests:\n");
+                    for (String brokenQa3TestBuild: brokenQa3TestBuilds) {
+                        message.append(brokenQa3TestBuild + "\n");
+                    }
+                }
+            }
+        }
+
         public MessageBuilder appendStatusMessage() {
             message.append(this.escape(getStatusMessage(build)));
             return this;
@@ -284,15 +320,48 @@ public class ActiveNotifier implements FineGrainedNotifier {
         }
 
         private MessageBuilder startMessage() {
-            if (build.getResult() == Result.FAILURE && getUserId() != null) {
-                message.append("<@").append(getUserId()).append(">");
-                message.append(": You have broken the build. Please fix it and don't let your teammates waiting!\n");
-            }
+            appendBrokenBuildNotificationAddressedToUserWhoTriggeredBuild();
             message.append(this.escape(build.getProject().getFullDisplayName()));
+            appendBranch();
             message.append(" - ");
             message.append(this.escape(build.getDisplayName()));
             message.append(" ");
+
             return this;
+        }
+
+        private void appendBranch() {
+            String buildBranch = getBuildBranch();
+            if (buildBranch != null) {
+                message.append("(branch: ").append(buildBranch).append(")");
+            }
+        }
+
+        private void appendBrokenBuildNotificationAddressedToUserWhoTriggeredBuild() {
+            String userId = getUserId(build);
+            if (build.getResult() == Result.FAILURE && userId != null) {
+                appendSendTo(userId);
+                String buildBranch = getBuildBranch();
+                if ("stable".equalsIgnoreCase(buildBranch)) {
+                    message.append(": You have broken a STABLE build. Please fix it and don't let your teammates waiting! :rotating_light: \n");
+                    String firstFailedBuildUserId = getUserId(findFirstFailedBuild());
+                    if (firstFailedBuildUserId != null && !userId.equals(firstFailedBuildUserId)) {
+                        appendSendTo(firstFailedBuildUserId);
+                        message.append(": You are a reason why your teammate build has failed. Please fix it and apologies!\n");
+                    }
+                } else {
+                    message.append(": Just a kind reminder that your build has failed. Don't shoot the messenger. :innocent: \n");
+                }
+            }
+        }
+
+        private String getBuildBranch() {
+            try {
+                String buildBranch = build.getEnvironment().get("BUILD_BRANCH");
+                return buildBranch != null ? buildBranch : build.getEnvironment().get("BRANCH");
+            } catch (Exception e) {
+                return null;
+            }
         }
 
         public MessageBuilder appendOpenLink() {
@@ -340,6 +409,14 @@ public class ActiveNotifier implements FineGrainedNotifier {
             return this;
         }
 
+        public void appendSendTo(String userId) {
+            message.append("<@").append(userId).append(">");
+        }
+
+        public void appendSendToEverybody() {
+            message.append("<!").append("channel").append(">");
+        }
+
         public String escape(String string) {
             string = string.replace("&", "&amp;");
             string = string.replace("<", "&lt;");
@@ -348,12 +425,12 @@ public class ActiveNotifier implements FineGrainedNotifier {
             return string;
         }
 
-        private String getUserId() {
-            Cause.UserIdCause userIdCause = findUserIdCause();
+        private String getUserId(Run build) {
+            Cause.UserIdCause userIdCause = findUserIdCause(build);
             return userIdCause != null ? userIdCause.getUserId() : null;
         }
 
-        private Cause.UserIdCause findUserIdCause() {
+        private Cause.UserIdCause findUserIdCause(Run build) {
             CauseAction causeAction = build.getAction(CauseAction.class);
             if (causeAction != null) {
                 Cause.UserIdCause userIdCause = causeAction.findCause(Cause.UserIdCause.class);
@@ -376,6 +453,28 @@ public class ActiveNotifier implements FineGrainedNotifier {
             }
 
             return null;
+        }
+
+        public List<String> getBrokenQa3TestBuilds() {
+            List<Project> projects = Jenkins.getInstance().getProjects();
+            List<String> brokenProjects = new ArrayList<String>();
+            for(Project p: projects) {
+                logger.log(Level.INFO, p.getName().toLowerCase());
+                if (p.getName().toLowerCase().contains("qa3_tests")
+                        && !p.getName().toLowerCase().contains("experimental")) { // ignore experimental test builds like Responsive_Experimental_QA3_Tests
+                    AbstractBuild lastBuild = p.getLastBuild();
+                    if (lastBuild != null && Result.FAILURE == lastBuild.getResult()) {
+                        brokenProjects.add(p.getName());
+                    }
+                }
+            }
+
+            return brokenProjects;
+        }
+
+        public Run findFirstFailedBuild() {
+            Run lastSuccessfulBuild = build.getProject().getLastSuccessfulBuild();
+            return lastSuccessfulBuild != null ? lastSuccessfulBuild.getNextBuild() : null;
         }
 
         public String toString() {
