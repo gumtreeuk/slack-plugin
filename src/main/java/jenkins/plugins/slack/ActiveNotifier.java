@@ -302,7 +302,7 @@ public class ActiveNotifier implements FineGrainedNotifier {
                 appendSendTo(userId);
                 String buildBranch = getBuildBranch();
                 if ("stable".equalsIgnoreCase(buildBranch)) {
-                    message.append(": You have broken a STABLE build. Please fix it and don't let your teammates waiting! :rotating_light: \n");
+                    message.append(": You have broken a STABLE build. Please fix it and don't let your teammates waiting! :strobe: \n");
                     String firstFailedBuildUserId = getUserId(findFirstFailedBuild());
                     if (firstFailedBuildUserId != null && !userId.equals(firstFailedBuildUserId)) {
                         appendSendTo(firstFailedBuildUserId);
